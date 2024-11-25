@@ -118,59 +118,6 @@ func startHttpSpan(request: URLRequest?) -> Span? {
 
 fileprivate var ASSOC_KEY_SPAN: UInt8 = 0
 
-extension URLSessionTask {
-    @objc open func splunk_swizzled_setState(state: URLSessionTask.State) {
-        defer {
-            splunk_swizzled_setState(state: state)
-        }
-
-        if !isSupportedTask(task: self) {
-            return
-        }
-
-        if state == URLSessionTask.State.running {
-            return
-        }
-
-        if currentRequest?.url == nil {
-            return
-        }
-
-        let maybeSpan: Span? = objc_getAssociatedObject(self, &ASSOC_KEY_SPAN) as? Span
-
-        if maybeSpan == nil {
-            return
-        }
-
-        endHttpSpan(span: maybeSpan!, task: self)
-    }
-
-    @objc open func splunk_swizzled_resume() {
-        defer {
-            splunk_swizzled_resume()
-        }
-
-        if !isSupportedTask(task: self) {
-            return
-        }
-
-        if self.state == URLSessionTask.State.completed ||
-            self.state == URLSessionTask.State.canceling {
-            return
-        }
-
-        let existingSpan: Span? = objc_getAssociatedObject(self, &ASSOC_KEY_SPAN) as? Span
-
-        if existingSpan != nil {
-            return
-        }
-
-        startHttpSpan(request: currentRequest).map { span in
-            objc_setAssociatedObject(self, &ASSOC_KEY_SPAN, span, objc_AssociationPolicy.OBJC_ASSOCIATION_RETAIN)
-        }
-    }
-}
-
 // FIXME use setImplementation and capture, rather than exchangeImpl
 func swizzle(clazz: AnyClass, orig: Selector, swizzled: Selector) {
     let origM = class_getInstanceMethod(clazz, orig)
@@ -224,12 +171,88 @@ func swizzledUrlSessionClasses() -> [AnyClass] {
 func swizzleUrlSession() {
     let classes = swizzledUrlSessionClasses()
 
-    let setStateSelector = NSSelectorFromString("setState:")
-    let resumeSelector = NSSelectorFromString("resume")
+    for cls in classes {
+        swizzleSetState(cls: cls)
+        swizzleResume(cls: cls)
+    }
+}
 
-    for classToSwizzle in classes {
-        swizzle(clazz: classToSwizzle, orig: setStateSelector, swizzled: #selector(URLSessionTask.splunk_swizzled_setState(state:)))
-        swizzle(clazz: classToSwizzle, orig: resumeSelector, swizzled: #selector(URLSessionTask.splunk_swizzled_resume))
+func swizzleSetState(cls: AnyClass) {
+    let selector = NSSelectorFromString("setState:")
+    guard let original = class_getInstanceMethod(cls, selector) else {
+        debug_log("injectInto \(selector.description) failed")
+        return
+    }
+    var originalIMP: IMP?
+
+    let block: @convention(block) (URLSessionTask, URLSessionTask.State) -> Void = { task, state in
+        let castedIMP = unsafeBitCast(originalIMP, to: (@convention(c) (URLSessionTask, Selector, URLSessionTask.State) -> Void).self)
+        castedIMP(task, selector, state)
+
+        if !isSupportedTask(task: task) {
+            return
+        }
+
+        if task.state == URLSessionTask.State.running {
+            return
+        }
+
+        if task.currentRequest?.url == nil {
+            return
+        }
+
+        let maybeSpan: Span? = objc_getAssociatedObject(task, &ASSOC_KEY_SPAN) as? Span
+        if maybeSpan == nil {
+            return
+        }
+
+        endHttpSpan(span: maybeSpan!, task: task)
+    }
+    let swizzledIMP = imp_implementationWithBlock(unsafeBitCast(block, to: AnyObject.self))
+    originalIMP = method_setImplementation(original, swizzledIMP)
+
+    debug_log("injectInto \(selector.description) succeeded")
+}
+
+func swizzleResume(cls: AnyClass) {
+    let selector = NSSelectorFromString("resume")
+    guard let original = class_getInstanceMethod(cls, selector) else {
+        debug_log("injectInto \(selector.description) failed")
+        return
+    }
+    var originalIMP: IMP?
+
+    let block: @convention(block) (URLSessionTask) -> Void = { task in
+        logResumeEvent(task: task)
+
+        let castedIMP = unsafeBitCast(originalIMP, to: (@convention(c) (Any, Selector) -> Void).self)
+
+        // Call original method
+        castedIMP(task, selector)
+    }
+    let swizzledIMP = imp_implementationWithBlock(unsafeBitCast(block, to: AnyObject.self))
+    originalIMP = method_setImplementation(original, swizzledIMP)
+
+    debug_log("injectInto \(selector.description) succeeded")
+}
+
+func logResumeEvent(task: URLSessionTask) {
+    if !isSupportedTask(task: task) {
+        return
+    }
+
+    if task.state == URLSessionTask.State.completed ||
+        task.state == URLSessionTask.State.canceling {
+        return
+    }
+
+    let existingSpan: Span? = objc_getAssociatedObject(task, &ASSOC_KEY_SPAN) as? Span
+    if existingSpan != nil {
+        return
+    }
+
+    startHttpSpan(request: task.currentRequest).map { span in
+        objc_setAssociatedObject(task, &ASSOC_KEY_SPAN, span, objc_AssociationPolicy.OBJC_ASSOCIATION_RETAIN)
     }
 }
 

@@ -1,19 +1,19 @@
 //
 /*
-Copyright 2021 Splunk Inc.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+ Copyright 2021 Splunk Inc.
+ 
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ 
+ http://www.apache.org/licenses/LICENSE-2.0
+ 
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ */
 
 import Foundation
 
@@ -182,4 +182,57 @@ import Foundation
                                                sessionSamplingRatio: self.sessionSamplingRatio,
                                                spanSchedulingDelay: self.spanSchedulingDelay))
     }
+
+    @objc
+    public static func debugUrlSessionSwizzling() {
+        traceSwizzlingURLSessionTaskResume()
+        traceSwizzlingURLSessionTaskSetState()
+    }
+}
+
+private func traceSwizzlingURLSessionTaskResume() {
+    let swizzledClass = URLSessionTask.self
+    let selector = #selector(URLSessionTask.resume)
+
+    guard let originalMethod = class_getInstanceMethod(swizzledClass, selector) else {
+        return
+    }
+
+    var originalIMP: IMP?
+
+    let block: @convention(block) (URLSessionTask) -> Void = { task in
+        let castedIMP = unsafeBitCast(originalIMP, to: (@convention(c) (Any, Selector) -> Void).self)
+
+        // Call original method
+        castedIMP(task, selector)
+
+        // Process
+        print((["👀 URLSessionTask resume call stack:"] + Thread.callStackSymbols).joined(separator: "\n"))
+    }
+
+    let swizzledIMP = imp_implementationWithBlock(unsafeBitCast(block, to: AnyObject.self))
+    originalIMP = method_setImplementation(originalMethod, swizzledIMP)
+}
+
+private func traceSwizzlingURLSessionTaskSetState() {
+    let swizzledClass = URLSessionTask.self
+    let selector = NSSelectorFromString("setState:")
+
+    guard let originalMethod = class_getInstanceMethod(swizzledClass, selector) else {
+        return
+    }
+
+    var originalIMP: IMP?
+
+    let block: @convention(block) (URLSessionTask, URLSessionTask.State) -> Void = { task, state in
+        let castedIMP = unsafeBitCast(originalIMP, to: (@convention(c) (Any, Selector, URLSessionTask.State) -> Void).self)
+
+        // Call original method
+        castedIMP(task, selector, state)
+
+        print((["👀 URLSessionTask setState call stack:"] + Thread.callStackSymbols).joined(separator: "\n"))
+    }
+
+    let swizzledIMP = imp_implementationWithBlock(unsafeBitCast(block, to: AnyObject.self))
+    originalIMP = method_setImplementation(originalMethod, swizzledIMP)
 }
